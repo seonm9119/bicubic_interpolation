@@ -8,7 +8,7 @@ public static class ImageProcessingPipeline
     private const double CriticalFeatureScale = 3.5;
     private const int CriticalFeatureLimit = 96;
 
-    public static ProcessedImageResult ProcessToPngDataUrl(byte[] imageBytes, ImageProcessingRequest processingRequest)
+    public static ProcessedImageResult ProcessToPng(byte[] imageBytes, ImageProcessingRequest processingRequest)
     {
         using var sourceImage = Image.Load<Rgba32>(imageBytes);
         var grayMap = BuildGrayMap(sourceImage);
@@ -31,10 +31,10 @@ public static class ImageProcessingPipeline
 
         using var outputStream = new MemoryStream();
         outputImage.SaveAsPng(outputStream);
-        var resultImageData = Convert.ToBase64String(outputStream.ToArray());
+        var resultImageBytes = outputStream.ToArray();
         var operationName = GetOperationName(processingRequest.Operation);
 
-        return new ProcessedImageResult(sourceImage.Width, sourceImage.Height, $"data:image/png;base64,{resultImageData}", operationName);
+        return new ProcessedImageResult(sourceImage.Width, sourceImage.Height, resultImageBytes, operationName);
     }
 
     public static FeatureMapResult BuildFeatureMap(byte[] imageBytes, int featureWeightPercent)

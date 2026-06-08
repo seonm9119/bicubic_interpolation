@@ -12,6 +12,6 @@ public sealed record ImageProcessingRequest(
     int FuzzyCutPercent,
     int FuzzyMidpointPercent);
 
-public sealed record ProcessedImageResult(int Width, int Height, string DataUrl, string OperationName);
+public sealed record ProcessedImageResult(int Width, int Height, byte[] PngBytes, string OperationName);
 
 public sealed record FeatureMapResult(int Width, int Height, string FeatureMapBase64, string Encoding);

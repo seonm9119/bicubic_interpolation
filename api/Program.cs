@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using BicubicInterpolation.Api;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Caching.Memory;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,6 +21,7 @@ builder.Services.AddHttpClient("sr-benchmark-api", client =>
     client.BaseAddress = new Uri(srganApiBaseUrl);
     client.Timeout = TimeSpan.FromMinutes(5);
 });
+builder.Services.AddMemoryCache();
 
 var app = builder.Build();
 var sampleImageDirectory = builder.Configuration["BICUBIC_SAMPLE_DIR"] ?? ResolveDefaultSampleImageDirectory(app.Environment.ContentRootPath);
@@ -138,8 +140,14 @@ var sampleImages = new[]
         "UPOL Iris Database",
         "https://phoenix.inf.upol.cz/iris/")
 };
+var cachedComparisonImageFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+{
+    "iris-default-srgan.png",
+    "iris-default-real-esrgan.png",
+    "iris-default-feature-weighted.png"
+};
 
-app.MapImageProcessingEndpoints();
+app.MapImageProcessingEndpoints(sampleImageDirectory);
 
 app.MapGet("/api/bicubic/health", () =>
 {
@@ -153,8 +161,10 @@ app.MapGet("/api/bicubic/health", () =>
     });
 });
 
-app.MapGet("/api/bicubic/samples", () =>
+app.MapGet("/api/bicubic/samples", (HttpResponse response) =>
 {
+    ApiCacheTools.SetPublicCacheHeaders(response);
+
     return Results.Ok(new
     {
         success = true,
@@ -162,7 +172,7 @@ app.MapGet("/api/bicubic/samples", () =>
     });
 });
 
-app.MapGet("/api/bicubic/samples/{sampleFileName}", (string sampleFileName) =>
+app.MapGet("/api/bicubic/samples/{sampleFileName}", (string sampleFileName, HttpResponse response) =>
 {
     var safeSampleFileName = Path.GetFileName(sampleFileName);
     var sampleImage = sampleImages.FirstOrDefault(candidateSampleImage =>
@@ -188,11 +198,44 @@ app.MapGet("/api/bicubic/samples/{sampleFileName}", (string sampleFileName) =>
         });
     }
 
+    ApiCacheTools.SetPublicCacheHeaders(response);
+
     return Results.File(sampleImagePath, sampleImage.ContentType, enableRangeProcessing: true);
 });
 
-app.MapGet("/api/bicubic/benchmark-samples", () =>
+app.MapGet("/api/bicubic/cached-images/{fileName}", (string fileName, HttpResponse response) =>
 {
+    var safeFileName = Path.GetFileName(fileName);
+
+    if (!cachedComparisonImageFileNames.Contains(safeFileName))
+    {
+        return Results.NotFound(new
+        {
+            success = false,
+            error = "요청한 캐시 이미지를 찾을 수 없습니다."
+        });
+    }
+
+    var cachedImagePath = Path.Combine(sampleImageDirectory, safeFileName);
+
+    if (!File.Exists(cachedImagePath))
+    {
+        return Results.NotFound(new
+        {
+            success = false,
+            error = "캐시 이미지 파일이 컨테이너에 마운트되지 않았습니다."
+        });
+    }
+
+    ApiCacheTools.SetPublicCacheHeaders(response);
+
+    return Results.File(cachedImagePath, "image/png", safeFileName, enableRangeProcessing: true);
+});
+
+app.MapGet("/api/bicubic/benchmark-samples", (HttpResponse response) =>
+{
+    ApiCacheTools.SetPublicCacheHeaders(response);
+
     return Results.Ok(new
     {
         success = true,
@@ -201,7 +244,10 @@ app.MapGet("/api/bicubic/benchmark-samples", () =>
     });
 });
 
-app.MapGet("/api/bicubic/benchmark-samples/{sampleId}/low-resolution", async (string sampleId) =>
+app.MapGet("/api/bicubic/benchmark-samples/{sampleId}/low-resolution", async (
+    string sampleId,
+    IMemoryCache memoryCache,
+    HttpResponse response) =>
 {
     var sampleImage = FindSampleImage(sampleImages, sampleId);
 
@@ -216,10 +262,28 @@ app.MapGet("/api/bicubic/benchmark-samples/{sampleId}/low-resolution", async (st
 
     try
     {
-        var highResolutionImageBytes = await ReadSampleImageBytesAsync(sampleImageDirectory, sampleImage);
-        var lowResolutionImage = SuperResolutionBenchmarkTools.CreateLowResolutionInput(
-            highResolutionImageBytes,
-            srganBenchmarkScaleFactor);
+        var lowResolutionCacheKey = $"bicubic:low-resolution:{sampleImage.Id}:x{srganBenchmarkScaleFactor}";
+        var lowResolutionImage = await memoryCache.GetOrCreateAsync(lowResolutionCacheKey, async cacheEntry =>
+        {
+            ApiCacheTools.ConfigureStaticMemoryCacheEntry(cacheEntry);
+
+            var highResolutionImageBytes = await ReadSampleImageBytesAsync(sampleImageDirectory, sampleImage);
+
+            return SuperResolutionBenchmarkTools.CreateLowResolutionInput(
+                highResolutionImageBytes,
+                srganBenchmarkScaleFactor);
+        });
+
+        if (lowResolutionImage is null)
+        {
+            return Results.BadRequest(new
+            {
+                success = false,
+                error = "low-resolution benchmark sample cache를 생성하지 못했습니다."
+            });
+        }
+
+        ApiCacheTools.SetPublicCacheHeaders(response);
 
         return Results.File(
             lowResolutionImage.PngBytes,
@@ -237,7 +301,11 @@ app.MapGet("/api/bicubic/benchmark-samples/{sampleId}/low-resolution", async (st
     }
 });
 
-app.MapGet("/api/bicubic/benchmark", async (string? sampleId, int? featureWeightPercent, IHttpClientFactory httpClientFactory) =>
+app.MapGet("/api/bicubic/benchmark", async (
+    string? sampleId,
+    int? featureWeightPercent,
+    IHttpClientFactory httpClientFactory,
+    HttpResponse response) =>
 {
     var sampleImage = FindSampleImage(sampleImages, sampleId) ?? sampleImages[0];
     var boundedFeatureWeightPercent = Math.Clamp(featureWeightPercent ?? 100, 0, 100);
@@ -245,6 +313,8 @@ app.MapGet("/api/bicubic/benchmark", async (string? sampleId, int? featureWeight
     if (boundedFeatureWeightPercent == 100 &&
         TryCreatePrecomputedBenchmarkResponse(sampleImage, srganBenchmarkScaleFactor, out var precomputedBenchmarkResponse))
     {
+        ApiCacheTools.SetPublicCacheHeaders(response);
+
         return Results.Ok(precomputedBenchmarkResponse);
     }
 
@@ -328,7 +398,7 @@ app.MapGet("/api/bicubic/benchmark", async (string? sampleId, int? featureWeight
     }
 });
 
-app.MapGet("/api/bicubic/default-comparison", (string? sampleId, int? featureWeightPercent) =>
+app.MapGet("/api/bicubic/default-comparison", (string? sampleId, int? featureWeightPercent, HttpResponse response) =>
 {
     var sampleImage = FindSampleImage(sampleImages, sampleId) ?? FindSampleImage(sampleImages, "iris");
     var boundedFeatureWeightPercent = Math.Clamp(featureWeightPercent ?? 100, 0, 100);
@@ -346,6 +416,8 @@ app.MapGet("/api/bicubic/default-comparison", (string? sampleId, int? featureWei
 
     try
     {
+        ApiCacheTools.SetPublicCacheHeaders(response);
+
         return Results.Ok(new
         {
             success = true,
@@ -391,7 +463,10 @@ app.MapGet("/api/bicubic/default-comparison", (string? sampleId, int? featureWei
     }
 });
 
-app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientFactory httpClientFactory) =>
+app.MapPost("/api/bicubic/interpolate", async (
+    HttpRequest request,
+    IHttpClientFactory httpClientFactory,
+    IMemoryCache memoryCache) =>
 {
     if (!request.HasFormContentType)
     {
@@ -426,9 +501,13 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
     var targetWidth = imageDimensions.Width.HasValue ? imageDimensions.Width.Value * scaleFactor : 320;
     var targetHeight = imageDimensions.Height.HasValue ? imageDimensions.Height.Value * scaleFactor : 320;
     var imageHash = Convert.ToHexString(SHA256.HashData(imageBytes)).ToLowerInvariant();
-    BicubicImageResult? bicubicImageResult = null;
-    SuperResolutionMetricResult? consistencyMetrics = null;
-    var outputMessage = string.Empty;
+    var interpolationCacheKey = CreateBicubicInterpolationCacheKey(
+        imageHash,
+        scaleFactor,
+        featureWeightPercent,
+        interpolationMode);
+    BicubicInterpolationCacheEntry? interpolationCacheEntry;
+    var isCached = true;
 
     try
     {
@@ -457,37 +536,49 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
             }
         }
 
-        if (interpolationMode == "classic-bicubic")
+        if (!memoryCache.TryGetValue(interpolationCacheKey, out interpolationCacheEntry) ||
+            interpolationCacheEntry is null)
         {
-            bicubicImageResult = ClassicBicubicInterpolator.ResizeToPngDataUrl(imageBytes, scaleFactor);
-            outputMessage = "Classic bicubic interpolation 결과 이미지를 생성했습니다.";
-        }
-        else if (interpolationMode == "feature-weighted")
-        {
-            var featureWeightMap = FeatureWeightMapBuilder.BuildFeatureWeightMap(imageBytes, featureWeightPercent);
-            bicubicImageResult = FeatureWeightedBicubicInterpolator.ResizeToPngDataUrl(
-                imageBytes,
-                scaleFactor,
-                featureWeightMap);
-            outputMessage = "Feature weighted bicubic interpolation 결과 이미지를 생성했습니다.";
-        }
-        else
-        {
-            var srganClient = httpClientFactory.CreateClient("sr-benchmark-api");
-            var srResult = interpolationMode == "real-esrgan"
-                ? await SrganInferenceClient.RequestRealEsrganImage(srganClient, imageBytes)
-                : await SrganInferenceClient.RequestSrganImage(srganClient, imageBytes);
+            isCached = false;
+            BicubicImageResult bicubicImageResult;
+            string outputMessage;
 
-            bicubicImageResult = new BicubicImageResult(srResult.Width, srResult.Height, srResult.PngBytes);
-            outputMessage = srResult.Message;
+            if (interpolationMode == "classic-bicubic")
+            {
+                bicubicImageResult = ClassicBicubicInterpolator.ResizeToPngDataUrl(imageBytes, scaleFactor);
+                outputMessage = "Classic bicubic interpolation 결과 이미지를 생성했습니다.";
+            }
+            else if (interpolationMode == "feature-weighted")
+            {
+                var featureWeightMap = FeatureWeightMapBuilder.BuildFeatureWeightMap(imageBytes, featureWeightPercent);
+                bicubicImageResult = FeatureWeightedBicubicInterpolator.ResizeToPngDataUrl(
+                    imageBytes,
+                    scaleFactor,
+                    featureWeightMap);
+                outputMessage = "Feature weighted bicubic interpolation 결과 이미지를 생성했습니다.";
+            }
+            else
+            {
+                var srganClient = httpClientFactory.CreateClient("sr-benchmark-api");
+                var srResult = interpolationMode == "real-esrgan"
+                    ? await SrganInferenceClient.RequestRealEsrganImage(srganClient, imageBytes)
+                    : await SrganInferenceClient.RequestSrganImage(srganClient, imageBytes);
+
+                bicubicImageResult = new BicubicImageResult(srResult.Width, srResult.Height, srResult.PngBytes);
+                outputMessage = srResult.Message;
+            }
+
+            var downsampledOutputImage = SuperResolutionBenchmarkTools.CreateLowResolutionInput(
+                bicubicImageResult.PngBytes,
+                scaleFactor);
+            var consistencyMetrics = SuperResolutionBenchmarkTools.CalculateMetrics(imageBytes, downsampledOutputImage.PngBytes);
+            interpolationCacheEntry = new BicubicInterpolationCacheEntry(bicubicImageResult, consistencyMetrics, outputMessage);
+
+            memoryCache.Set(interpolationCacheKey, interpolationCacheEntry, ApiCacheTools.CreateComputeCacheOptions());
         }
 
-        targetWidth = bicubicImageResult.Width;
-        targetHeight = bicubicImageResult.Height;
-        var downsampledOutputImage = SuperResolutionBenchmarkTools.CreateLowResolutionInput(
-            bicubicImageResult.PngBytes,
-            scaleFactor);
-        consistencyMetrics = SuperResolutionBenchmarkTools.CalculateMetrics(imageBytes, downsampledOutputImage.PngBytes);
+        targetWidth = interpolationCacheEntry.ImageResult.Width;
+        targetHeight = interpolationCacheEntry.ImageResult.Height;
     }
     catch (InvalidOperationException exception)
     {
@@ -498,9 +589,19 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
         });
     }
 
+    if (interpolationCacheEntry is null)
+    {
+        return Results.BadRequest(new
+        {
+            success = false,
+            error = "bicubic interpolation cache를 생성하지 못했습니다."
+        });
+    }
+
     return Results.Ok(new
     {
         success = true,
+        cached = isCached,
         status = "received",
         input = new
         {
@@ -522,9 +623,9 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
         {
             targetWidth,
             targetHeight,
-            resultImage = bicubicImageResult?.DataUrl,
-            message = outputMessage,
-            metrics = consistencyMetrics is null ? null : CreateMetricResponse(consistencyMetrics),
+            resultImage = interpolationCacheEntry.ImageResult.DataUrl,
+            message = interpolationCacheEntry.OutputMessage,
+            metrics = CreateMetricResponse(interpolationCacheEntry.ConsistencyMetrics),
             metricReference = new
             {
                 type = "downsample-consistency",
@@ -545,6 +646,15 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
 });
 
 app.Run();
+
+static string CreateBicubicInterpolationCacheKey(
+    string imageHash,
+    int scaleFactor,
+    int featureWeightPercent,
+    string interpolationMode)
+{
+    return $"bicubic:interpolate:{imageHash}:{scaleFactor}:{featureWeightPercent}:{interpolationMode}";
+}
 
 static int ReadBoundedInt(string? rawValue, int defaultValue, int minValue, int maxValue)
 {
@@ -783,8 +893,6 @@ static object CreateCachedComparisonResponse(
         throw new InvalidOperationException($"캐시 이미지 파일을 찾을 수 없습니다: {fileName}");
     }
 
-    var imageBytes = File.ReadAllBytes(imagePath);
-
     return new
     {
         success = true,
@@ -795,7 +903,7 @@ static object CreateCachedComparisonResponse(
         {
             targetWidth = width,
             targetHeight = height,
-            resultImage = $"data:image/png;base64,{Convert.ToBase64String(imageBytes)}",
+            resultImage = $"/api/bicubic/cached-images/{Uri.EscapeDataString(fileName)}",
             metrics,
             message
         }
@@ -943,3 +1051,8 @@ sealed record BicubicSampleImage(
     int Height,
     string SourceName,
     string SourceUrl);
+
+sealed record BicubicInterpolationCacheEntry(
+    BicubicImageResult ImageResult,
+    SuperResolutionMetricResult ConsistencyMetrics,
+    string OutputMessage);
