@@ -246,6 +246,12 @@ app.MapGet("/api/bicubic/benchmark", async (string? sampleId, int? featureWeight
     var sampleImage = FindSampleImage(sampleImages, sampleId) ?? sampleImages[0];
     var boundedFeatureWeightPercent = Math.Clamp(featureWeightPercent ?? 100, 0, 100);
 
+    if (boundedFeatureWeightPercent == 100 &&
+        TryCreatePrecomputedBenchmarkResponse(sampleImage, srganBenchmarkScaleFactor, out var precomputedBenchmarkResponse))
+    {
+        return Results.Ok(precomputedBenchmarkResponse);
+    }
+
     try
     {
         var highResolutionImageBytes = await ReadSampleImageBytesAsync(sampleImageDirectory, sampleImage);
@@ -323,6 +329,69 @@ app.MapGet("/api/bicubic/benchmark", async (string? sampleId, int? featureWeight
     catch (InvalidOperationException exception)
     {
         return Results.BadRequest(new
+        {
+            success = false,
+            error = exception.Message
+        });
+    }
+});
+
+app.MapGet("/api/bicubic/default-comparison", (string? sampleId, int? featureWeightPercent) =>
+{
+    var sampleImage = FindSampleImage(sampleImages, sampleId) ?? FindSampleImage(sampleImages, "iris");
+    var boundedFeatureWeightPercent = Math.Clamp(featureWeightPercent ?? 100, 0, 100);
+
+    if (sampleImage is null ||
+        !string.Equals(sampleImage.Id, "iris", StringComparison.OrdinalIgnoreCase) ||
+        boundedFeatureWeightPercent != 100)
+    {
+        return Results.NotFound(new
+        {
+            success = false,
+            error = "요청한 기본 비교 cache를 찾을 수 없습니다."
+        });
+    }
+
+    try
+    {
+        return Results.Ok(new
+        {
+            success = true,
+            cached = true,
+            cacheType = "default-iris-comparison",
+            sample = CreateBenchmarkSampleResponse(sampleImage, srganBenchmarkScaleFactor),
+            srgan = CreateCachedComparisonResponse(
+                sampleImageDirectory,
+                "iris-default-srgan.png",
+                "srgan",
+                "SRGAN",
+                960,
+                848,
+                CreateCachedMetricResponse(35.5101, 0.998014, 18.2841, 4.2760, 3.7233),
+                "Cached default iris SRGAN result."),
+            realEsrgan = CreateCachedComparisonResponse(
+                sampleImageDirectory,
+                "iris-default-real-esrgan.png",
+                "real-esrgan",
+                "Real-ESRGAN",
+                960,
+                848,
+                CreateCachedMetricResponse(36.7571, 0.997743, 13.7205, 3.7041, 2.7021),
+                "Cached default iris Real-ESRGAN result."),
+            improved = CreateCachedComparisonResponse(
+                sampleImageDirectory,
+                "iris-default-feature-weighted.png",
+                "feature-weighted",
+                "Feature-weighted Bicubic",
+                960,
+                848,
+                CreateCachedMetricResponse(49.5545, 0.999873, 0.7205, 0.8488, 0.5025),
+                "Cached default iris Feature-weighted Bicubic result.")
+        });
+    }
+    catch (InvalidOperationException exception)
+    {
+        return Results.NotFound(new
         {
             success = false,
             error = exception.Message
@@ -614,6 +683,147 @@ static object CreateBenchmarkMethodResponse(
         },
         metrics = CreateMetricResponse(metricResult),
         note
+    };
+}
+
+static bool TryCreatePrecomputedBenchmarkResponse(
+    BicubicSampleImage sampleImage,
+    int scaleFactor,
+    out object response)
+{
+    var methods = sampleImage.Id switch
+    {
+        "set5-butterfly" => new[]
+        {
+            CreateCachedBenchmarkMethodResponse("classic-bicubic", "Bicubic", 19.1929, 0.892718, 783.0466, 27.9830, 17.1146),
+            CreateCachedBenchmarkMethodResponse("srgan", "SRGAN", 23.4497, 0.966190, 293.8427, 17.1418, 11.0174),
+            CreateCachedBenchmarkMethodResponse("real-esrgan", "Real-ESRGAN", 20.5984, 0.945396, 566.5489, 23.8023, 16.3036),
+            CreateCachedBenchmarkMethodResponse("feature-weighted", "Feature-weighted Bicubic", 20.7737, 0.931423, 544.1335, 23.3267, 15.0930)
+        },
+        "lenna" => new[]
+        {
+            CreateCachedBenchmarkMethodResponse("classic-bicubic", "Bicubic", 27.4548, 0.973705, 116.8428, 10.8094, 6.6036),
+            CreateCachedBenchmarkMethodResponse("srgan", "SRGAN", 27.7916, 0.981384, 108.1244, 10.3983, 7.0775),
+            CreateCachedBenchmarkMethodResponse("real-esrgan", "Real-ESRGAN", 27.1709, 0.978271, 124.7355, 11.1685, 7.2500),
+            CreateCachedBenchmarkMethodResponse("feature-weighted", "Feature-weighted Bicubic", 28.8303, 0.982010, 85.1241, 9.2263, 5.6361)
+        },
+        "set5-woman" => new[]
+        {
+            CreateCachedBenchmarkMethodResponse("classic-bicubic", "Bicubic", 22.8415, 0.966941, 338.0089, 18.3850, 9.8941),
+            CreateCachedBenchmarkMethodResponse("srgan", "SRGAN", 26.0613, 0.985449, 161.0464, 12.6904, 7.7212),
+            CreateCachedBenchmarkMethodResponse("real-esrgan", "Real-ESRGAN", 24.4791, 0.980649, 231.8329, 15.2261, 9.1982),
+            CreateCachedBenchmarkMethodResponse("feature-weighted", "Feature-weighted Bicubic", 24.4865, 0.977918, 231.4350, 15.2130, 8.1901)
+        },
+        "iris" => new[]
+        {
+            CreateCachedBenchmarkMethodResponse("classic-bicubic", "Bicubic", 37.2617, 0.997701, 12.2155, 3.4951, 2.2792),
+            CreateCachedBenchmarkMethodResponse("srgan", "SRGAN", 33.6142, 0.996348, 28.2921, 5.3190, 4.2313),
+            CreateCachedBenchmarkMethodResponse("real-esrgan", "Real-ESRGAN", 33.6725, 0.995072, 27.9143, 5.2834, 3.6372),
+            CreateCachedBenchmarkMethodResponse("feature-weighted", "Feature-weighted Bicubic", 38.9628, 0.998463, 8.2567, 2.8734, 1.7543)
+        },
+        _ => null
+    };
+
+    if (methods is null)
+    {
+        response = new { };
+        return false;
+    }
+
+    response = new
+    {
+        success = true,
+        cached = true,
+        cacheType = "precomputed-benchmark",
+        sample = CreateBenchmarkSampleResponse(sampleImage, scaleFactor),
+        request = new
+        {
+            scaleFactor,
+            featureWeightPercent = 100
+        },
+        resolution = new
+        {
+            inputWidth = Math.Max(1, sampleImage.Width / scaleFactor),
+            inputHeight = Math.Max(1, sampleImage.Height / scaleFactor),
+            targetWidth = sampleImage.Width,
+            targetHeight = sampleImage.Height,
+            linearScale = scaleFactor,
+            pixelScale = scaleFactor * scaleFactor,
+            pixelIncreasePercent = (scaleFactor * scaleFactor - 1) * 100
+        },
+        methods,
+        paperReference = CreateSrganPaperReferenceResponse()
+    };
+
+    return true;
+}
+
+static object CreateCachedBenchmarkMethodResponse(
+    string id,
+    string label,
+    double psnrDb,
+    double ssim,
+    double mse,
+    double rmse,
+    double mae)
+{
+    return new
+    {
+        id,
+        label,
+        status = "complete",
+        cached = true,
+        output = (object?)null,
+        metrics = CreateCachedMetricResponse(psnrDb, ssim, mse, rmse, mae),
+        note = "Precomputed sample benchmark metric."
+    };
+}
+
+static object CreateCachedComparisonResponse(
+    string sampleImageDirectory,
+    string fileName,
+    string id,
+    string label,
+    int width,
+    int height,
+    object metrics,
+    string message)
+{
+    var imagePath = Path.Combine(sampleImageDirectory, fileName);
+
+    if (!File.Exists(imagePath))
+    {
+        throw new InvalidOperationException($"캐시 이미지 파일을 찾을 수 없습니다: {fileName}");
+    }
+
+    var imageBytes = File.ReadAllBytes(imagePath);
+
+    return new
+    {
+        success = true,
+        cached = true,
+        id,
+        label,
+        output = new
+        {
+            targetWidth = width,
+            targetHeight = height,
+            resultImage = $"data:image/png;base64,{Convert.ToBase64String(imageBytes)}",
+            metrics,
+            message
+        }
+    };
+}
+
+static object CreateCachedMetricResponse(double psnrDb, double ssim, double mse, double rmse, double mae)
+{
+    return new
+    {
+        psnrDb,
+        ssim,
+        mse,
+        rmse,
+        mae
     };
 }
 
