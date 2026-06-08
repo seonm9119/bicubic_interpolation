@@ -15,11 +15,7 @@ venv/
 env/
 
 # Benchmark datasets and generated outputs
-datasets/feature_score/cache/
-datasets/feature_score/results/
-datasets/feature_score/prepared/
-datasets/feature_score/raw/
-datasets/feature_score/archives/
+datasets/
 reference/
 sample/
 
