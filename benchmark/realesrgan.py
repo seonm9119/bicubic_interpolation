@@ -66,7 +66,7 @@ class RRDBNet(nn.Module):
 
 
 def load_realesrgan_generator(checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     state_dict = checkpoint.get("params_ema") or checkpoint.get("params") or checkpoint
     realesrgan_generator = RRDBNet(scale=4)
     realesrgan_generator.load_state_dict(state_dict, strict=True)

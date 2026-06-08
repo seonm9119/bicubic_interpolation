@@ -1,5 +1,14 @@
+import argparse
+
 import torch
 from torch import nn
+
+
+class Configuration:
+    pass
+
+
+Configuration.__module__ = "utils.config"
 
 
 def create_same_padding_layer(kernel_size, mode="reflection"):
@@ -84,7 +93,8 @@ class SRResNet(nn.Module):
 
 
 def load_srgan_generator(checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    torch.serialization.add_safe_globals([Configuration, argparse.Namespace])
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     generator_state = checkpoint["runner"]["generator"]
     srgan_generator = SRResNet(upscale_factor=4)
     srgan_generator.load_state_dict(generator_state)
