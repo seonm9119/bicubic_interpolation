@@ -1,4 +1,3 @@
-bin/
-obj/
-.git/
-.vs/
+__pycache__/
+**/__pycache__/
+*.py[cod]
