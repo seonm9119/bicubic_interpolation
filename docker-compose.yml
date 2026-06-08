@@ -1,0 +1,48 @@
+services:
+  sr-benchmark:
+    build:
+      context: ./benchmark
+      dockerfile: Dockerfile
+    image: sr-benchmark:latest
+    container_name: sr-benchmark
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - sr-benchmark
+    ports:
+      - "127.0.0.1:8021:8080"
+    environment:
+      - SRGAN_DEVICE=cuda
+      - SR_MODEL_MAX_INPUT_PIXELS=65536
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  sr-bicubic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sr-bicubic:latest
+    container_name: sr-bicubic
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8020:8080"
+    environment:
+      - BICUBIC_SAMPLE_DIR=/app/sample
+      - SRGAN_API_BASE_URL=http://sr-benchmark:8080
+    volumes:
+      - ./sample:/app/sample:ro
+    depends_on:
+      sr-benchmark:
+        condition: service_started
+    networks:
+      default:
+        aliases:
+          - sr-bicubic
