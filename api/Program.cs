@@ -14,14 +14,8 @@ builder.Services.Configure<FormOptions>(options =>
     options.MultipartBodyLengthLimit = 50 * 1024 * 1024;
 });
 
-var imageProcessingApiBaseUrl = builder.Configuration["IMAGE_PROCESSING_API_BASE_URL"] ?? "http://image-processing-api:8080";
-builder.Services.AddHttpClient("image-processing-api", client =>
-{
-    client.BaseAddress = new Uri(imageProcessingApiBaseUrl);
-    client.Timeout = TimeSpan.FromMinutes(3);
-});
-var srganApiBaseUrl = builder.Configuration["SRGAN_API_BASE_URL"] ?? "http://srgan-api:8080";
-builder.Services.AddHttpClient("srgan-api", client =>
+var srganApiBaseUrl = builder.Configuration["SRGAN_API_BASE_URL"] ?? "http://sr-benchmark:8080";
+builder.Services.AddHttpClient("sr-benchmark-api", client =>
 {
     client.BaseAddress = new Uri(srganApiBaseUrl);
     client.Timeout = TimeSpan.FromMinutes(5);
@@ -145,6 +139,8 @@ var sampleImages = new[]
         "https://phoenix.inf.upol.cz/iris/")
 };
 
+app.MapImageProcessingEndpoints();
+
 app.MapGet("/api/bicubic/health", () =>
 {
     return Results.Ok(new
@@ -264,11 +260,7 @@ app.MapGet("/api/bicubic/benchmark", async (string? sampleId, int? featureWeight
         var classicBicubicMetrics = SuperResolutionBenchmarkTools.CalculateMetrics(
             highResolutionImageBytes,
             classicBicubicResult.PngBytes);
-        var imageProcessingClient = httpClientFactory.CreateClient("image-processing-api");
-        var featureWeightMap = await FeatureWeightMapClient.RequestFeatureWeightMap(
-            imageProcessingClient,
-            lowResolutionImage.PngBytes,
-            boundedFeatureWeightPercent);
+        var featureWeightMap = FeatureWeightMapBuilder.BuildFeatureWeightMap(lowResolutionImage.PngBytes, boundedFeatureWeightPercent);
         var featureWeightedResult = FeatureWeightedBicubicInterpolator.ResizeToPngDataUrl(
             lowResolutionImage.PngBytes,
             srganBenchmarkScaleFactor,
@@ -472,12 +464,7 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
         }
         else if (interpolationMode == "feature-weighted")
         {
-            var imageProcessingClient = httpClientFactory.CreateClient("image-processing-api");
-            var featureWeightMap = await FeatureWeightMapClient.RequestFeatureWeightMap(
-                imageProcessingClient,
-                imageBytes,
-                featureWeightPercent);
-
+            var featureWeightMap = FeatureWeightMapBuilder.BuildFeatureWeightMap(imageBytes, featureWeightPercent);
             bicubicImageResult = FeatureWeightedBicubicInterpolator.ResizeToPngDataUrl(
                 imageBytes,
                 scaleFactor,
@@ -486,7 +473,7 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
         }
         else
         {
-            var srganClient = httpClientFactory.CreateClient("srgan-api");
+            var srganClient = httpClientFactory.CreateClient("sr-benchmark-api");
             var srResult = interpolationMode == "real-esrgan"
                 ? await SrganInferenceClient.RequestRealEsrganImage(srganClient, imageBytes)
                 : await SrganInferenceClient.RequestSrganImage(srganClient, imageBytes);
@@ -550,7 +537,7 @@ app.MapPost("/api/bicubic/interpolate", async (HttpRequest request, IHttpClientF
         {
             "upload",
             "read image header",
-            interpolationMode == "feature-weighted" ? "request image-processing feature map" : "classic bicubic interpolation",
+            interpolationMode == "feature-weighted" ? "build image-processing feature map" : "classic bicubic interpolation",
             interpolationMode == "feature-weighted" ? "feature-weighted bicubic interpolation" : "encode png result",
             "return api response"
         }
@@ -834,7 +821,7 @@ static async Task<object> CreateSrganBenchmarkMethodResponse(
 {
     try
     {
-        var srganClient = httpClientFactory.CreateClient("srgan-api");
+        var srganClient = httpClientFactory.CreateClient("sr-benchmark-api");
         var srganResult = await SrganInferenceClient.RequestSrganImage(srganClient, lowResolutionImageBytes);
         var srganMetrics = SuperResolutionBenchmarkTools.CalculateMetrics(
             highResolutionImageBytes,
@@ -878,7 +865,7 @@ static async Task<object> CreateRealEsrganBenchmarkMethodResponse(
 {
     try
     {
-        var srganClient = httpClientFactory.CreateClient("srgan-api");
+        var srganClient = httpClientFactory.CreateClient("sr-benchmark-api");
         var realEsrganResult = await SrganInferenceClient.RequestRealEsrganImage(srganClient, lowResolutionImageBytes);
         var realEsrganMetrics = SuperResolutionBenchmarkTools.CalculateMetrics(
             highResolutionImageBytes,
