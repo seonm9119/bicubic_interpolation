@@ -1,0 +1,43 @@
+# C# build outputs
+bin/
+obj/
+TestResults/
+*.user
+*.suo
+*.rsuser
+
+# Python runtime and virtual environments
+__pycache__/
+*.py[cod]
+.python-version
+.venv/
+venv/
+env/
+
+# Benchmark datasets and generated outputs
+datasets/feature_score/cache/
+datasets/feature_score/results/
+datasets/feature_score/prepared/
+datasets/feature_score/raw/
+datasets/feature_score/archives/
+reference/
+sample/
+
+# Model and metric artifacts
+*.pth
+*.pt
+*.onnx
+*.ckpt
+*.safetensors
+*.npy
+*.npz
+*.csv
+*.tsv
+
+# Local and container noise
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak
+docker-compose.override.yml
