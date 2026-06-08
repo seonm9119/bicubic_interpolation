@@ -2,24 +2,34 @@
 bin/
 obj/
 TestResults/
+BenchmarkDotNet.Artifacts/
 *.user
 *.suo
 *.rsuser
+*.nupkg
 
 # Python runtime and virtual environments
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .python-version
 .venv/
 venv/
 env/
 
-# Benchmark datasets and generated outputs
+# Benchmark datasets, private runtime assets, references, and generated outputs.
 datasets/
 reference/
 sample/
+artifacts/
+outputs/
+results/
 
 # Model and metric artifacts
+models/
 *.pth
 *.pt
 *.onnx
