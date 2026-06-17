@@ -25,6 +25,11 @@ builder.Services.AddMemoryCache();
 
 var app = builder.Build();
 var sampleImageDirectory = builder.Configuration["BICUBIC_SAMPLE_DIR"] ?? ResolveDefaultSampleImageDirectory(app.Environment.ContentRootPath);
+var serverImageDirectory = builder.Configuration["BICUBIC_DATA_DIR"] ?? sampleImageDirectory;
+var serverImageDisplayPath = builder.Configuration["BICUBIC_DATA_DISPLAY_PATH"] ?? serverImageDirectory;
+var imageProcessingDefaultImageDirectory =
+    builder.Configuration["IMAGE_PROCESSING_SAMPLE_DIR"] ??
+    ResolveImageProcessingDefaultImageDirectory(app.Environment.ContentRootPath);
 const int srganBenchmarkScaleFactor = 4;
 const long srBenchmarkMaxInputPixels = 65_536;
 var sampleImages = new[]
@@ -147,7 +152,7 @@ var cachedComparisonImageFileNames = new HashSet<string>(StringComparer.OrdinalI
     "iris-default-feature-weighted.png"
 };
 
-app.MapImageProcessingEndpoints(sampleImageDirectory);
+app.MapImageProcessingEndpoints(imageProcessingDefaultImageDirectory);
 
 app.MapGet("/api/bicubic/health", () =>
 {
@@ -170,6 +175,73 @@ app.MapGet("/api/bicubic/samples", (HttpResponse response) =>
         success = true,
         samples = sampleImages.Select(CreateSampleImageResponse)
     });
+});
+
+app.MapGet("/api/bicubic/files", (HttpResponse response) =>
+{
+    if (!Directory.Exists(serverImageDirectory))
+    {
+        return Results.NotFound(new
+        {
+            success = false,
+            error = "Bicubic server image 폴더가 컨테이너에 마운트되지 않았습니다.",
+            folderPath = serverImageDisplayPath
+        });
+    }
+
+    var imageFiles = Directory
+        .EnumerateFiles(serverImageDirectory, "*", SearchOption.AllDirectories)
+        .Where(IsSupportedBicubicImageFile)
+        .OrderBy(filePath => filePath, StringComparer.OrdinalIgnoreCase)
+        .Select(filePath =>
+        {
+            var fileInfo = new FileInfo(filePath);
+            var relativePath = Path
+                .GetRelativePath(serverImageDirectory, filePath)
+                .Replace(Path.DirectorySeparatorChar, '/');
+
+            return new
+            {
+                name = fileInfo.Name,
+                relativePath,
+                size = fileInfo.Length,
+                contentType = GetBicubicImageContentType(filePath),
+                url = $"/api/bicubic/server-image?relativePath={Uri.EscapeDataString(relativePath)}"
+            };
+        })
+        .ToArray();
+
+    ApiCacheTools.SetPublicCacheHeaders(response);
+
+    return Results.Ok(new
+    {
+        success = true,
+        folderPath = serverImageDisplayPath,
+        displayPath = serverImageDisplayPath,
+        files = imageFiles
+    });
+});
+
+app.MapGet("/api/bicubic/server-image", (string? relativePath, HttpResponse response) =>
+{
+    var imagePath = ResolveSafeBicubicDataFilePath(serverImageDirectory, relativePath);
+
+    if (imagePath is null)
+    {
+        return Results.NotFound(new
+        {
+            success = false,
+            error = "요청한 Bicubic server image를 찾을 수 없습니다."
+        });
+    }
+
+    ApiCacheTools.SetPublicCacheHeaders(response);
+
+    return Results.File(
+        imagePath,
+        GetBicubicImageContentType(imagePath),
+        Path.GetFileName(imagePath),
+        enableRangeProcessing: true);
 });
 
 app.MapGet("/api/bicubic/samples/{sampleFileName}", (string sampleFileName, HttpResponse response) =>
@@ -694,6 +766,18 @@ static string ResolveDefaultSampleImageDirectory(string contentRootPath)
     return Path.Combine(contentRootPath, "sample");
 }
 
+static string ResolveImageProcessingDefaultImageDirectory(string contentRootPath)
+{
+    var packagedImageProcessingAssetDirectory = Path.Combine(contentRootPath, "image_processing_assets");
+
+    if (Directory.Exists(packagedImageProcessingAssetDirectory))
+    {
+        return packagedImageProcessingAssetDirectory;
+    }
+
+    return Path.GetFullPath(Path.Combine(contentRootPath, "..", "image_processing", "assets"));
+}
+
 static object CreateSampleImageResponse(BicubicSampleImage sampleImage)
 {
     return new
@@ -757,6 +841,46 @@ static async Task<byte[]> ReadSampleImageBytesAsync(string sampleImageDirectory,
     }
 
     return await File.ReadAllBytesAsync(sampleImagePath);
+}
+
+static string? ResolveSafeBicubicDataFilePath(string serverImageDirectory, string? relativePath)
+{
+    if (string.IsNullOrWhiteSpace(relativePath))
+    {
+        return null;
+    }
+
+    var normalizedRootPath = Path.GetFullPath(serverImageDirectory);
+    var requestedPath = relativePath.Replace('/', Path.DirectorySeparatorChar);
+    var normalizedImagePath = Path.GetFullPath(Path.Combine(normalizedRootPath, requestedPath));
+    var rootPathPrefix = normalizedRootPath.EndsWith(Path.DirectorySeparatorChar)
+        ? normalizedRootPath
+        : $"{normalizedRootPath}{Path.DirectorySeparatorChar}";
+
+    if (!normalizedImagePath.StartsWith(rootPathPrefix, StringComparison.Ordinal) ||
+        !File.Exists(normalizedImagePath) ||
+        !IsSupportedBicubicImageFile(normalizedImagePath))
+    {
+        return null;
+    }
+
+    return normalizedImagePath;
+}
+
+static bool IsSupportedBicubicImageFile(string filePath)
+{
+    return Path.GetExtension(filePath).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".bmp" or ".webp";
+}
+
+static string GetBicubicImageContentType(string filePath)
+{
+    return Path.GetExtension(filePath).ToLowerInvariant() switch
+    {
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".bmp" => "image/bmp",
+        ".webp" => "image/webp",
+        _ => "image/png"
+    };
 }
 
 static object CreateBenchmarkMethodResponse(

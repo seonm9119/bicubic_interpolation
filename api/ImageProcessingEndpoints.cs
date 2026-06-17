@@ -261,6 +261,8 @@ public static class ImageProcessingEndpoints
             request = new
             {
                 operation = processingRequest.Operation,
+                thresholdMode = processingRequest.ThresholdMode,
+                binaryThresholdPercent = processingRequest.BinaryThresholdPercent,
                 edgeThresholdPercent = processingRequest.EdgeThresholdPercent,
                 sobelGainPercent = processingRequest.SobelGainPercent,
                 sobelKernelSize = processingRequest.SobelKernelSize,
@@ -290,6 +292,8 @@ public static class ImageProcessingEndpoints
             "apply",
             imageHash,
             processingRequest.Operation,
+            processingRequest.ThresholdMode,
+            processingRequest.BinaryThresholdPercent,
             processingRequest.EdgeThresholdPercent,
             processingRequest.SobelGainPercent,
             processingRequest.SobelKernelSize,
@@ -330,6 +334,8 @@ public static class ImageProcessingEndpoints
     {
         return new ImageProcessingRequest(
             NormalizeOperation(readField("operation")),
+            NormalizeThresholdMode(readField("thresholdMode")),
+            ReadBoundedInt(readField("binaryThresholdPercent"), 50, 0, 100),
             ReadBoundedInt(readField("edgeThresholdPercent"), 24, 0, 100),
             ReadBoundedInt(readField("sobelGainPercent"), 68, 0, 100),
             NormalizeKernelSize(ReadBoundedInt(readField("sobelKernelSize"), 3, 3, 7)),
@@ -381,6 +387,8 @@ public static class ImageProcessingEndpoints
             "gaussian-blur" => "gaussian-blur",
             "log-sharpening" => "log-sharpening",
             "fuzzy-stretching" => "fuzzy-stretching",
+            "binary" => "binary-threshold",
+            "binary-threshold" => "binary-threshold",
             "absolute-edge" => "absolute-edge",
             "absolute-log" => "absolute-log",
             "texture-density" => "texture-density",
@@ -388,6 +396,16 @@ public static class ImageProcessingEndpoints
             "corner-gate" => "corner-gate",
             "critical-feature-fusion" => "critical-feature-fusion",
             _ => "sobel-edge"
+        };
+    }
+
+    private static string NormalizeThresholdMode(string? rawThresholdMode)
+    {
+        return rawThresholdMode switch
+        {
+            "mean" => "mean",
+            "max-min" => "max-min",
+            _ => "fixed"
         };
     }
 }

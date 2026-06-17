@@ -35,10 +35,12 @@ services:
     ports:
       - "127.0.0.1:8020:8080"
     environment:
-      - BICUBIC_SAMPLE_DIR=/app/sample
+      - BICUBIC_DATA_DIR=/app/datasets/iris
+      - BICUBIC_DATA_DISPLAY_PATH=/home/nami/repo/gpt_analysis/project/bicubic_interpolation/datasets/iris
+      - IMAGE_PROCESSING_SAMPLE_DIR=/app/image_processing_assets
       - SRGAN_API_BASE_URL=http://sr-benchmark:8080
     volumes:
-      - ./sample:/app/sample:ro
+      - ./datasets/iris:/app/datasets/iris:ro
     depends_on:
       sr-benchmark:
         condition: service_started

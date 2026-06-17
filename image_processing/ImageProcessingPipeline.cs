@@ -18,6 +18,7 @@ public static class ImageProcessingPipeline
             "gaussian-blur" => BuildGrayImage(BuildGaussianBlurMap(grayMap, processingRequest)),
             "log-sharpening" => BuildLogSharpenedImage(sourceImage, grayMap, processingRequest),
             "fuzzy-stretching" => BuildGrayImage(BuildFuzzyStretchingMap(grayMap, processingRequest)),
+            "binary-threshold" => BuildGrayImage(BuildBinaryThresholdMap(grayMap, processingRequest)),
             "absolute-edge" => BuildGrayImage(BuildAbsoluteSobelEdgeMap(grayMap)),
             "absolute-log" => BuildGrayImage(BuildAbsoluteLogMap(grayMap)),
             "texture-density" => BuildGrayImage(BuildTextureDensityMap(grayMap)),
@@ -32,7 +33,7 @@ public static class ImageProcessingPipeline
         using var outputStream = new MemoryStream();
         outputImage.SaveAsPng(outputStream);
         var resultImageBytes = outputStream.ToArray();
-        var operationName = GetOperationName(processingRequest.Operation);
+        var operationName = GetOperationName(processingRequest);
 
         return new ProcessedImageResult(sourceImage.Width, sourceImage.Height, resultImageBytes, operationName);
     }
@@ -50,13 +51,14 @@ public static class ImageProcessingPipeline
             "uint8-row-major");
     }
 
-    private static string GetOperationName(string operation)
+    private static string GetOperationName(ImageProcessingRequest processingRequest)
     {
-        return operation switch
+        var operationName = processingRequest.Operation switch
         {
             "gaussian-blur" => "Gaussian Blur",
             "log-sharpening" => "LoG Sharpening",
             "fuzzy-stretching" => "Fuzzy Stretching",
+            "binary-threshold" => "Binary Threshold",
             "absolute-edge" => "Absolute Edge Map",
             "absolute-log" => "Absolute LoG Detail",
             "texture-density" => "Texture Density",
@@ -65,6 +67,30 @@ public static class ImageProcessingPipeline
             "critical-feature-fusion" => "Critical Feature Fusion",
             _ => "Sobel Edge Detection"
         };
+        return operationName;
+    }
+
+    private static int[,] BuildBinaryThresholdMap(int[,] grayMap, ImageProcessingRequest processingRequest)
+    {
+        var width = grayMap.GetLength(0);
+        var height = grayMap.GetLength(1);
+        var binaryMap = new int[width, height];
+        var threshold = processingRequest.ThresholdMode switch
+        {
+            "mean" => CalculateMeanThreshold(grayMap),
+            "max-min" => (FindMaximum(grayMap) + FindMinimum(grayMap)) / 2,
+            _ => processingRequest.BinaryThresholdPercent * 255 / 100
+        };
+
+        for (var x = 0; x < width; x += 1)
+        {
+            for (var y = 0; y < height; y += 1)
+            {
+                binaryMap[x, y] = grayMap[x, y] > threshold ? 255 : 0;
+            }
+        }
+
+        return binaryMap;
     }
 
     private static int[,] BuildFeatureWeightMap(Image<Rgba32> sourceImage, int featureWeightPercent)
@@ -586,6 +612,53 @@ public static class ImageProcessingPipeline
         }
 
         return normalizedMap;
+    }
+
+    private static int CalculateMeanThreshold(int[,] sourceMap)
+    {
+        var width = sourceMap.GetLength(0);
+        var height = sourceMap.GetLength(1);
+        var graySum = 0;
+
+        for (var x = 0; x < width; x += 1)
+        {
+            for (var y = 0; y < height; y += 1)
+            {
+                graySum += sourceMap[x, y];
+            }
+        }
+
+        return graySum / (width * height);
+    }
+
+    private static int FindMaximum(int[,] sourceMap)
+    {
+        var maximum = 0;
+
+        for (var x = 0; x < sourceMap.GetLength(0); x += 1)
+        {
+            for (var y = 0; y < sourceMap.GetLength(1); y += 1)
+            {
+                maximum = Math.Max(maximum, sourceMap[x, y]);
+            }
+        }
+
+        return maximum;
+    }
+
+    private static int FindMinimum(int[,] sourceMap)
+    {
+        var minimum = 255;
+
+        for (var x = 0; x < sourceMap.GetLength(0); x += 1)
+        {
+            for (var y = 0; y < sourceMap.GetLength(1); y += 1)
+            {
+                minimum = Math.Min(minimum, sourceMap[x, y]);
+            }
+        }
+
+        return minimum;
     }
 
     private static int[,] BlendMaps(int[,] sourceMap, int[,] processedMap, double blendAmount)

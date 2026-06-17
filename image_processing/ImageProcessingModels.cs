@@ -2,6 +2,8 @@ namespace ImageProcessing.Api;
 
 public sealed record ImageProcessingRequest(
     string Operation,
+    string ThresholdMode,
+    int BinaryThresholdPercent,
     int EdgeThresholdPercent,
     int SobelGainPercent,
     int SobelKernelSize,
