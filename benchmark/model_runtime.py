@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import threading
 import time
 
 import numpy as np
@@ -17,12 +18,19 @@ CHECKPOINT_PATH = os.environ.get("SRGAN_CHECKPOINT_PATH", "/app/models/srgan.pth
 REALESRGAN_CHECKPOINT_PATH = os.environ.get("REALESRGAN_CHECKPOINT_PATH", "/app/models/RealESRGAN_x4plus.pth")
 PREFERRED_DEVICE = os.environ.get("SRGAN_DEVICE", "cuda")
 SR_MODEL_MAX_INPUT_PIXELS = int(os.environ.get("SR_MODEL_MAX_INPUT_PIXELS", "65536"))
+SR_MODEL_IDLE_UNLOAD_SECONDS = float(os.environ.get("SR_MODEL_IDLE_UNLOAD_SECONDS", "60"))
 DEVICE = torch.device("cuda" if PREFERRED_DEVICE == "cuda" and torch.cuda.is_available() else "cpu")
-SRGAN_GENERATOR = load_srgan_generator(CHECKPOINT_PATH, DEVICE)
-REALESRGAN_GENERATOR = load_realesrgan_generator(REALESRGAN_CHECKPOINT_PATH, DEVICE)
+
+MODEL_LOCK = threading.RLock()
+MODEL_UNLOAD_TIMER = None
+ACTIVE_MODEL_REQUESTS = 0
+LAST_MODEL_USED_AT = None
+SRGAN_GENERATOR = None
+REALESRGAN_GENERATOR = None
 
 
 def create_health_response():
+    model_state = get_model_state()
     return {
         "success": True,
         "status": "ok",
@@ -33,7 +41,118 @@ def create_health_response():
         "device": str(DEVICE),
         "cudaAvailable": torch.cuda.is_available(),
         "gpuName": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "idleUnloadSeconds": SR_MODEL_IDLE_UNLOAD_SECONDS,
+        "modelState": model_state,
     }
+
+
+def get_model_state():
+    with MODEL_LOCK:
+        if LAST_MODEL_USED_AT is None:
+            last_used_seconds_ago = None
+        else:
+            last_used_seconds_ago = round(time.monotonic() - LAST_MODEL_USED_AT, 2)
+
+        return {
+            "activeRequests": ACTIVE_MODEL_REQUESTS,
+            "lastUsedSecondsAgo": last_used_seconds_ago,
+            "loaded": {
+                "srgan": SRGAN_GENERATOR is not None,
+                "realesrgan": REALESRGAN_GENERATOR is not None,
+            },
+        }
+
+
+def begin_model_request():
+    global ACTIVE_MODEL_REQUESTS
+
+    with MODEL_LOCK:
+        ACTIVE_MODEL_REQUESTS += 1
+        cancel_model_unload_timer_locked()
+
+
+def finish_model_request():
+    global ACTIVE_MODEL_REQUESTS
+    global LAST_MODEL_USED_AT
+
+    with MODEL_LOCK:
+        ACTIVE_MODEL_REQUESTS = max(0, ACTIVE_MODEL_REQUESTS - 1)
+        LAST_MODEL_USED_AT = time.monotonic()
+        schedule_model_unload_locked()
+
+
+def cancel_model_unload_timer_locked():
+    global MODEL_UNLOAD_TIMER
+
+    if MODEL_UNLOAD_TIMER is not None:
+        MODEL_UNLOAD_TIMER.cancel()
+        MODEL_UNLOAD_TIMER = None
+
+
+def schedule_model_unload_locked():
+    global MODEL_UNLOAD_TIMER
+
+    if DEVICE.type != "cuda":
+        return
+
+    if SR_MODEL_IDLE_UNLOAD_SECONDS < 0:
+        return
+
+    cancel_model_unload_timer_locked()
+
+    if SR_MODEL_IDLE_UNLOAD_SECONDS == 0:
+        release_models(force=True)
+        return
+
+    MODEL_UNLOAD_TIMER = threading.Timer(SR_MODEL_IDLE_UNLOAD_SECONDS, release_models)
+    MODEL_UNLOAD_TIMER.daemon = True
+    MODEL_UNLOAD_TIMER.start()
+
+
+def release_models(force=False):
+    global SRGAN_GENERATOR
+    global REALESRGAN_GENERATOR
+
+    with MODEL_LOCK:
+        if ACTIVE_MODEL_REQUESTS > 0:
+            return False
+
+        if not force and LAST_MODEL_USED_AT is not None:
+            idle_seconds = time.monotonic() - LAST_MODEL_USED_AT
+
+            if idle_seconds < SR_MODEL_IDLE_UNLOAD_SECONDS:
+                schedule_model_unload_locked()
+                return False
+
+        had_loaded_models = SRGAN_GENERATOR is not None or REALESRGAN_GENERATOR is not None
+        SRGAN_GENERATOR = None
+        REALESRGAN_GENERATOR = None
+
+        if DEVICE.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+        return had_loaded_models
+
+
+def get_srgan_generator():
+    global SRGAN_GENERATOR
+
+    with MODEL_LOCK:
+        if SRGAN_GENERATOR is None:
+            SRGAN_GENERATOR = load_srgan_generator(CHECKPOINT_PATH, DEVICE)
+
+        return SRGAN_GENERATOR
+
+
+def get_realesrgan_generator():
+    global REALESRGAN_GENERATOR
+
+    with MODEL_LOCK:
+        if REALESRGAN_GENERATOR is None:
+            REALESRGAN_GENERATOR = load_realesrgan_generator(REALESRGAN_CHECKPOINT_PATH, DEVICE)
+
+        return REALESRGAN_GENERATOR
 
 
 async def upscale_with_model(image_file, model_name, model_source, output_message, inference_function):
@@ -50,6 +169,7 @@ async def upscale_with_model(image_file, model_name, model_source, output_messag
     validate_model_input_size(low_resolution_image, model_name)
 
     started_at = time.perf_counter()
+    begin_model_request()
     try:
         output_image = inference_function(low_resolution_image)
     except torch.OutOfMemoryError as exception:
@@ -57,6 +177,8 @@ async def upscale_with_model(image_file, model_name, model_source, output_messag
             torch.cuda.empty_cache()
 
         raise HTTPException(status_code=507, detail=f"{model_name} GPU 메모리가 부족합니다. 더 작은 이미지로 테스트해 주세요.") from exception
+    finally:
+        finish_model_request()
 
     elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
     output_bytes = encode_png(output_image)
@@ -103,9 +225,10 @@ def validate_model_input_size(low_resolution_image, model_name):
 
 def run_srgan_inference(low_resolution_image):
     input_tensor = convert_image_to_tensor(low_resolution_image).to(DEVICE)
+    srgan_generator = get_srgan_generator()
 
     with torch.inference_mode():
-        output_tensor = SRGAN_GENERATOR(input_tensor)
+        output_tensor = srgan_generator(input_tensor)
 
     output_tensor = normalize_srgan_output(output_tensor)
 
@@ -114,9 +237,10 @@ def run_srgan_inference(low_resolution_image):
 
 def run_realesrgan_inference(low_resolution_image):
     input_tensor = convert_rgb_image_to_bgr_tensor(low_resolution_image).to(DEVICE)
+    realesrgan_generator = get_realesrgan_generator()
 
     with torch.inference_mode():
-        output_tensor = REALESRGAN_GENERATOR(input_tensor)
+        output_tensor = realesrgan_generator(input_tensor)
 
     output_tensor = output_tensor.detach().float().cpu().clamp(0.0, 1.0)
 

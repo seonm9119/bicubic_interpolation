@@ -1,6 +1,13 @@
 from fastapi import FastAPI, File, UploadFile
 
-from model_runtime import create_health_response, run_realesrgan_inference, run_srgan_inference, upscale_with_model
+from model_runtime import (
+    create_health_response,
+    get_model_state,
+    release_models,
+    run_realesrgan_inference,
+    run_srgan_inference,
+    upscale_with_model,
+)
 
 
 app = FastAPI(title="SR Benchmark Inference API")
@@ -14,6 +21,17 @@ def srgan_health():
 @app.get("/api/realesrgan/health")
 def realesrgan_health():
     return create_health_response()
+
+
+@app.post("/api/models/release")
+def release_loaded_models():
+    released = release_models(force=True)
+
+    return {
+        "success": True,
+        "released": released,
+        "modelState": get_model_state(),
+    }
 
 
 @app.post("/api/srgan/upscale")
